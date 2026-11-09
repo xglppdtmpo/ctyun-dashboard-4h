@@ -32,6 +32,26 @@ const { runScgSession, describeScgMaterialPresence, cemBootVm } = require('./scg
 const DATA_PLANE_FAIL_LIMIT = 2;
 
 // ============================================================================
+// 数据面保活节奏：建会话 → hold → 主动断开 → 等到下一周期 → 再建
+//
+// 【2026-11-08 用户口径】原来数据面是"切片一结束立刻重拨"，会话几乎全程被占，
+// 用户连云电脑时一直被顶下线（官方 App 弹"云电脑被抢占提醒"）。用户要的是
+// "伪装客户端顶一次线，但别一直占着"：每 4 小时顶一次、每次顶 3 分钟。
+//   平台判据是"24 小时无活动才关机"，4 小时一次 × 6 次/天完全够用。
+// hold 期间会话被占（约 3 分钟），其余时间桌面是空的，用户随时能连。
+// 可经环境变量覆盖，便于排障。
+// ============================================================================
+const DATA_PLANE_HOLD_SEC = Math.max(
+  30,
+  parseInt(process.env.CTYUN_DATA_PLANE_HOLD_SEC, 10) || 180
+);
+// 建会话失败时的退避：失败时并没有占住会话，但也不能 30s 一次狂刷
+const DATA_PLANE_FAIL_BACKOFF_MS = Math.max(
+  60 * 1000,
+  (parseInt(process.env.CTYUN_DATA_PLANE_FAIL_BACKOFF_MIN, 10) || 5) * 60 * 1000
+);
+
+// ============================================================================
 // 保活"有效性"独立核验看门狗的默认节拍
 //
 // 【2026-09-23 事故修复】这三个常量此前**只被引用、从未被定义**（全仓 0 处赋值），
@@ -92,10 +112,19 @@ class YdpcClient {
     this.sendNotification = sendNotification || (() => {});
     this.saveConfig = saveConfig || (() => {});
 
+    // 【2026-11-08】登录态 + 设备标识 + UserId 持久化：
+    //   平台一个账号只允许一个活跃终端 ⇒ 每次重启都重新登录 = 把用户官方 App 顶掉一次。
+    //   把 sohoToken / deviceCode / sohoUserId 落盘复用后，重启不再重复登录，也不会被平台当成"新设备"。
+    //   ⚠️ sohoUserId 必须一起持久化：SOHO 网关的每个请求都要带 X-SOHO-UserId，
+    //   只存 token 不存 userId ⇒ 重启后请求头里 userId 为空 ⇒ 平台统一回
+    //   「服务端系统异常，请稍后重试」（实测复现：token 本身有效，缺的是 userId）。
     this.sohoClient = new SohoClient({
       deviceId: account.deviceCode,
+      sohoToken: account.sohoToken || '',
+      userId: account.sohoUserId || '',
       accountType: account.accountType || 'main'
     });
+    if (!account.deviceCode) account.deviceCode = this.sohoClient.deviceId;
 
     this.metrics = {
       status: 'offline', // 'online' | 'offline'
@@ -124,11 +153,40 @@ class YdpcClient {
     this._vmPrevOffState = new Map();
   }
 
+  /**
+   * 登录（带去重）。
+   *
+   * 【2026-11-08】此前 refreshVms 与数据面循环会**同时**发现 sohoToken 为空、
+   * 并发各发一次登录请求：日志里同一秒出现两条「正在登录」+ 两条「登录成功」。
+   * 移动爱家一个账号只允许一个活跃终端 ⇒ 并发登录 = 把用户官方 App 顶掉两次。
+   * 现在并发调用共享同一个在途 Promise，进程内任何时刻最多只有一次真实登录。
+   */
   async login() {
+    if (this._loginPromise) return this._loginPromise;
+    this._loginPromise = this._doLogin().finally(() => { this._loginPromise = null; });
+    return this._loginPromise;
+  }
+
+  async _doLogin() {
     const accName = this.account.name || this.account.user;
     try {
       this.appendLog('SOHO', `[${accName}] 正在向中国移动 SOHO 认证中心登录 (类型: ${this.account.accountType === 'sub' ? '独立子账号' : '和家亲主账号'})...`, 'info', accName, 'ydpc');
       const res = await this.sohoClient.login(this.account.user, this.account.password, this.account.accountType || 'main');
+      // 登录成功 ⇒ 立刻把登录态、设备标识与 UserId 落盘，下次重启直接复用，不再重新登录（不顶官方 App）
+      try {
+        const token = res && res.sohoToken ? String(res.sohoToken) : '';
+        let changed = false;
+        if (token && this.account.sohoToken !== token) { this.account.sohoToken = token; changed = true; }
+        // 【2026-11-08】userId 必须落盘：SOHO 网关每个请求都要带 X-SOHO-UserId，
+        // 只存 token ⇒ 重启后 userId 为空 ⇒ 所有接口回「服务端系统异常」（实测复现）。
+        const uid = res && res.userId ? String(res.userId) : '';
+        if (uid && this.account.sohoUserId !== uid) { this.account.sohoUserId = uid; changed = true; }
+        if (!this.account.deviceCode && this.sohoClient.deviceId) {
+          this.account.deviceCode = this.sohoClient.deviceId;
+          changed = true;
+        }
+        if (changed) this.saveConfig();
+      } catch (e) { /* 落盘失败不影响登录本身 */ }
       this.appendLog('SOHO', `[${accName}] ✅ SOHO 鉴权登录成功 (UserId: ${res.userId})`, 'success', accName, 'ydpc');
       return { success: true, data: res };
     } catch (err) {
@@ -140,7 +198,7 @@ class YdpcClient {
   async refreshVms() {
     const accName = this.account.name || this.account.user;
     try {
-      if (!this.sohoClient.sohoToken) {
+      if (!this.sohoClient.sohoToken || !this.sohoClient.userId) {
         await this.login();
       }
       const vms = await this.sohoClient.listCloudPcs();
@@ -370,7 +428,7 @@ class YdpcClient {
     }
 
     try {
-      if (!this.sohoClient.sohoToken) {
+      if (!this.sohoClient.sohoToken || !this.sohoClient.userId) {
         await this.login();
       }
       const res = await this.sohoClient.getMqttConnectInfo();
@@ -441,7 +499,7 @@ class YdpcClient {
     }
 
     try {
-      if (!this.sohoClient.sohoToken) {
+      if (!this.sohoClient.sohoToken || !this.sohoClient.userId) {
         await this.login();
       }
       const res = await this.sohoClient.heartbeat(usid);
@@ -493,7 +551,7 @@ class YdpcClient {
     }
 
     try {
-      if (!this.sohoClient.sohoToken) {
+      if (!this.sohoClient.sohoToken || !this.sohoClient.userId) {
         await this.login();
       }
       const firmAuth = await this.sohoClient.getFirmAuth(usid);
@@ -552,7 +610,7 @@ class YdpcClient {
     const usid = userServiceId || this.account.vms?.[0]?.userServiceId;
     if (!usid) throw new Error('未找到有效的 userServiceId');
 
-    if (!this.sohoClient.sohoToken) {
+    if (!this.sohoClient.sohoToken || !this.sohoClient.userId) {
       await this.login();
     }
 
@@ -589,7 +647,7 @@ class YdpcClient {
    */
   async bootVmViaCag(userServiceId, accName = null) {
     const name = accName || this.account.name || this.account.user;
-    if (!this.sohoClient.sohoToken) {
+    if (!this.sohoClient.sohoToken || !this.sohoClient.userId) {
       await this.login();
     }
 
@@ -764,8 +822,27 @@ class YdpcClient {
       if (existing) this.stopDataPlaneTask(usid, accName);
       return;
     }
-    if (existing && existing.running) return; // 已在跑
+    if (existing && existing.running) {
+      // 周期被改过（单机覆盖 / 账号默认）⇒ 用新周期重建任务。
+      // 重启不会立刻占线：startDataPlaneTask 会按 dataPlaneLastDialAt + 新周期 续算。
+      if (existing.cycleMs === this._resolveCycleMs(vm)) return;
+      this.stopDataPlaneTask(usid, accName);
+    }
     this.startDataPlaneTask(vm, usid, accName);
+  }
+
+  /**
+   * 解析该机当前生效的占线间隔（毫秒）。
+   * 口径：单机 keepaliveInterval > 账号 keepaliveInterval > 兜底 4 小时。
+   */
+  _resolveCycleMs(vm) {
+    const sec = Math.max(
+      60,
+      parseInt(vm && vm.keepaliveInterval, 10) ||
+        parseInt(this.account.keepaliveInterval, 10) ||
+        14400
+    );
+    return sec * 1000;
   }
 
   /**
@@ -780,6 +857,9 @@ class YdpcClient {
   isDataPlaneActive(usid) {
     const task = this.dataPlaneTasks.get(String(usid));
     if (!task || !task.running) return false;
+    // 【2026-11-08】"在等待下一轮顶线"的空档期，会话是空的 ⇒ 不算在场，
+    // 让控制面（SOHO 心跳）照常接管，避免出现"两边都不发"的真空。
+    if (task.nextDialAt && Date.now() < task.nextDialAt) return false;
     return (task.failStreak || 0) < DATA_PLANE_FAIL_LIMIT;
   }
 
@@ -860,7 +940,7 @@ class YdpcClient {
     const f = (this.account && this.account.features) || {};
     const usid = String((vm && vm.userServiceId) || '');
     const vmName = (vm && vm.vmName) || '移动云电脑';
-    const defaultIntervalSec = Math.max(60, parseInt(this.account && this.account.keepaliveInterval) || 600);
+    const defaultIntervalSec = Math.max(60, parseInt(this.account && this.account.keepaliveInterval) || 14400);
     const intervalSec = Math.max(60, parseInt(vm && vm.keepaliveInterval) || defaultIntervalSec);
 
     const running = !isYdpcVmOff(vm);
@@ -1124,6 +1204,7 @@ class YdpcClient {
     if (!task) return;
     task.stopFlag = true;
     task.running = false;
+    if (task._sleepTimer) { try { clearTimeout(task._sleepTimer); } catch (e) { /* 已清理 */ } task._sleepTimer = null; }
     try { if (task.socket) task.socket.destroy(); } catch (e) { /* 已关闭 */ }
     this.dataPlaneTasks.delete(usid);
     this.appendLog('CAGRAW', `[${name}] 数据面保活已停止 (userServiceId: ${usid})`, 'info', name, 'ydpc');
@@ -1132,10 +1213,22 @@ class YdpcClient {
 
   startDataPlaneTask(vm, usid, accName) {
     const name = accName || this.account.name || this.account.user;
+    // 顶线周期：单机覆盖优先，其次账号 keepaliveInterval，最后兜底 4 小时
+    const CYCLE_MS = this._resolveCycleMs(vm);
+    // 【2026-11-08】重启不打断既有节奏：上次顶线时刻若还在本周期内，就等到点再拨。
+    // 否则每次重启（改配置 / 容器重启 / 崩溃拉起）都会立刻顶一次线，白推一条抢占提醒。
+    const dialMap = (this.account.stats && this.account.stats.dataPlaneLastDialAt) || {};
+    const lastDialAt = Number(dialMap[usid]) || 0;
+    const resumeAt = lastDialAt > 0 ? lastDialAt + CYCLE_MS : 0;
     const task = {
       running: true, stopFlag: false, socket: null,
+      // 当前生效周期：ensureDataPlaneKeepalive 据此判断是否需要按新周期重建
+      cycleMs: CYCLE_MS,
       // 假活跃防线：failStreak 到阈值 ⇒ isDataPlaneActive 判否 ⇒ 控制面立刻接管
       failStreak: 0, lastProgressAt: 0, demoted: false,
+      // 【2026-11-08】节奏控制：nextDialAt 之前是"空档期"（不占会话），
+      // isDataPlaneActive 据此判否、把控制面交还回来。
+      nextDialAt: resumeAt > Date.now() ? resumeAt : 0, _sleepTimer: null,
       // 底座标签：降级留证的措辞要按底座分叉（SCG 无 CAG 握手，笼统写"CAG 握手"是失真）
       routeKind: (vm && vm._route && vm._route.kind) || ''
     };
@@ -1144,15 +1237,50 @@ class YdpcClient {
     const { dialCagTcpRaw, keepaliveRawZtecLoop } = require('./zte_cag_raw');
     const { cagBootVm, zteDecodeConnectStr, parseConnectCommand } = require('./cag_boot');
 
-    // 15 分钟切片：每轮 hold 后重拨。官方客户端 ~30min 无真实隧道活动会关机，
-    // 纯 HB 也会 BrokenPipe；connectStr 有 TTL，重拨前须刷新。
-    // （可经 vm._dataPlaneHoldSeconds 覆盖，仅用于测试/排障）
-    const HOLD_SLICE_S = Number(vm._dataPlaneHoldSeconds) || 900;
+    // 每次顶线 hold 多久：固定 180 秒（用户口径：占线时长不可调整）
+    const HOLD_SLICE_S = DATA_PLANE_HOLD_SEC;
+
+    // 可中断的等待：长睡 4 小时期间要能被 stopFlag 打断
+    const sleepUntil = (ts) => new Promise((resolve) => {
+      const tick = () => {
+        if (!task.running || task.stopFlag) { task._sleepTimer = null; return resolve(); }
+        const left = ts - Date.now();
+        if (left <= 0) { task._sleepTimer = null; return resolve(); }
+        task._sleepTimer = setTimeout(tick, Math.min(left, 5000));
+      };
+      tick();
+    });
+
+    // 一轮顶线结束：登记下次顶线时间（从本轮开始算一个周期），并如实留证
+    const scheduleNext = (cycleStart, label) => {
+      task.nextDialAt = Math.max(Date.now() + 1000, cycleStart + CYCLE_MS);
+      // 持久化"上次顶线时刻"：重启后接着原节奏走，不额外顶一次线
+      try {
+        this.account.stats = this.account.stats || {};
+        this.account.stats.dataPlaneLastDialAt = this.account.stats.dataPlaneLastDialAt || {};
+        this.account.stats.dataPlaneLastDialAt[usid] = cycleStart;
+        this.saveConfig();
+      } catch (e) { /* 持久化失败不得影响保活主流程 */ }
+      const mins = Math.max(1, Math.round((task.nextDialAt - Date.now()) / 60000));
+      this.appendLog(
+        label,
+        `[${name}] 本次顶线完成，已主动断开释放会话；${mins} 分钟后` +
+        `（${new Date(task.nextDialAt).toLocaleString('zh-CN', { hour12: false, timeZone: 'Asia/Shanghai' })}）再顶一次`,
+        'info', name, 'ydpc'
+      );
+      this._recordVmAction(usid, `📡 顶线完成 · 已释放会话，${mins} 分钟后再顶`, 'ok');
+    };
 
     const loop = async () => {
       while (task.running && !task.stopFlag) {
+        // 未到点先睡（空档期不占会话，用户可随时连云电脑）
+        if (task.nextDialAt && Date.now() < task.nextDialAt) {
+          await sleepUntil(task.nextDialAt);
+          if (!task.running || task.stopFlag) break;
+        }
+        const cycleStart = Date.now();
         try {
-          if (!this.sohoClient.sohoToken) await this.login();
+          if (!this.sohoClient.sohoToken || !this.sohoClient.userId) await this.login();
           const firmAuth = await this.sohoClient.getFirmAuth(usid);
 
           // ══════════════════════════════════════════════════════════════════
@@ -1193,14 +1321,14 @@ class YdpcClient {
               'SCG',
               `[${name}] SCG 切片结束：会话 ${session.sessionId}，通道 [${session.channels.join(',') || '无'}]，` +
               `display=${session.displayProven ? '已观察到显示数据' : '未观察到显示数据'}，` +
-              `帧 ${session.stats.frames} / 应答 ${session.stats.responses}，重拨中`,
+              `帧 ${session.stats.frames} / 应答 ${session.stats.responses}，已主动断开释放会话`,
               session.displayProven ? 'success' : 'warning', name, 'ydpc'
             );
             this._recordVmAction(
               usid,
               session.displayProven
-                ? '📡 SCG 切片完成（已观察到显示数据），重拨中'
-                : '📡 SCG 切片完成（仅通道就绪，未见显示数据），重拨中',
+                ? '📡 SCG 切片完成（已观察到显示数据），已释放会话'
+                : '📡 SCG 切片完成（仅通道就绪，未见显示数据），已释放会话',
               session.displayProven ? 'ok' : 'warn'
             );
             // 走到这里说明 SCG 会话**真的建起来过**（材料齐、TLS 通、通道认证完成）
@@ -1208,6 +1336,7 @@ class YdpcClient {
             // 注：displayProven 只影响措辞，不影响"隧道是否存在"这件事本身。
             this._noteDataPlaneProgress(task, usid, name);
             task.socket = null;
+            scheduleNext(cycleStart, 'SCG');
             continue;
           }
 
@@ -1279,10 +1408,11 @@ class YdpcClient {
             // 会话建立不等于保活被证明（见 keepaliveProven 恒 false 的诚实性口径）。
             this._recordVmAction(
               usid,
-              `📡 数据面切片完成 (TLS+SPICE)，重拨中 (消息 ${session.messages} / 心跳 ${session.heartbeats})`,
+              `📡 数据面切片完成 (TLS+SPICE)，已释放会话 (消息 ${session.messages} / 心跳 ${session.heartbeats})`,
               session.errors > 0 ? 'warn' : 'ok'
             );
             task.socket = null;
+            scheduleNext(cycleStart, 'CAGTLS');
             continue;
           }
 
@@ -1319,13 +1449,14 @@ class YdpcClient {
           // 不写成"保活成功"，避免把无法自证的管道通当成保活有效。
           this._recordVmAction(
             usid,
-            `📡 数据面切片完成，重拨中 (hb 收/发 ${counters.hbRecv}/${counters.hbSent})`,
+            `📡 数据面切片完成，已释放会话 (hb 收/发 ${counters.hbRecv}/${counters.hbSent})`,
             counters.error ? 'warn' : 'ok'
           );
 
-          // 4. 收尾，进入下一轮重拨
+          // 4. 收尾：主动断开释放会话，等到下一轮顶线时间再拨
           try { dial.socket.destroy(); } catch (e) { /* 已关闭 */ }
           task.socket = null;
+          scheduleNext(cycleStart, 'CAGRAW');
         } catch (err) {
           if (!task.running || task.stopFlag) break;
           const errMsg = String(err.message || '');
@@ -1353,21 +1484,29 @@ class YdpcClient {
             this._recordVmAction(usid, '⏸ SCG 材料未下发（机器可能未运行）· 等待重试', 'warn');
             try { if (task.socket) task.socket.destroy(); } catch (e) { /* 已关闭 */ }
             task.socket = null;
-            await new Promise((r) => setTimeout(r, 60000));
+            task.nextDialAt = Date.now() + 60000;
             continue;
           }
-          // 非耗尽类错误（网络抖动 / 拨号失败等）→ 短暂退避后重试
+          // 非耗尽类错误（网络抖动 / 拨号失败等）→ 退避后重试。
+          // 【2026-11-08】退避从 30s 拉长到 5 分钟：失败时虽然没占住会话，
+          // 但 30s 一次的狂刷仍会周期性短暂抢线；5 分钟退避期间控制面照常接管。
           this._noteDataPlaneFailure(task, usid, name, errMsg);
-          this.appendLog('CAGRAW', `[${name}] 数据面保活异常，30s 后重试：${errMsg}`, 'warning', name, 'ydpc');
+          const backoffMin = Math.max(1, Math.round(DATA_PLANE_FAIL_BACKOFF_MS / 60000));
+          this.appendLog('CAGRAW', `[${name}] 数据面保活异常，${backoffMin} 分钟后重试：${errMsg}`, 'warning', name, 'ydpc');
           try { if (task.socket) task.socket.destroy(); } catch (e) { /* 已关闭 */ }
           task.socket = null;
-          await new Promise((r) => setTimeout(r, 30000));
+          task.nextDialAt = Date.now() + DATA_PLANE_FAIL_BACKOFF_MS;
         }
       }
       if (this.dataPlaneTasks.get(usid) === task) this.dataPlaneTasks.delete(usid);
     };
 
-    this.appendLog('CAGRAW', `[${name}] 🚀 数据面保活已启动 (userServiceId: ${usid})`, 'info', name, 'ydpc');
+    this.appendLog(
+      'CAGRAW',
+      `[${name}] 🚀 数据面保活已启动 (userServiceId: ${usid})：每 ${Math.round(CYCLE_MS / 60000)} 分钟顶一次线，` +
+      `每次保持 ${HOLD_SLICE_S} 秒后主动断开释放会话`,
+      'info', name, 'ydpc'
+    );
     this._recordVmAction(usid, '📡 数据面隧道建立中', 'idle');
     loop().catch(() => {});
   }
@@ -1549,7 +1688,7 @@ class YdpcClient {
     try {
       this.workerRunning = true;
 
-      const defaultIntervalSec = Math.max(60, parseInt(this.account.keepaliveInterval) || 600);
+      const defaultIntervalSec = Math.max(60, parseInt(this.account.keepaliveInterval) || 14400);
       this.appendLog('CAG', `[${accName}] 移动爱家多机独立时间戳看门狗已启动 (基准周期: ${Math.round(defaultIntervalSec / 60)} 分钟)...`, 'info', accName, 'ydpc');
 
       // 【2026-09-23】保活"有效性"自动核验：每 30 分钟用独立轮询电源状态判定一次，
@@ -1590,8 +1729,25 @@ class YdpcClient {
           return;
         }
 
-        // 定期静默刷新 VM 状态 (每 60 秒一次)
-        if (!this._lastVmsRefreshAt || Date.now() - this._lastVmsRefreshAt > 60000) {
+        // 【2026-11-08 静默模式】平台把"有 API 请求活动的设备"当成一个**在线终端**，
+        // 于是用户用官方 App 连云电脑时会被仲裁顶掉（连上约 30 秒弹「已在其他终端抢占连接」）。
+        // 实测：MQTT 关、数据面关，只要本进程还在，照样被顶 —— 凶手就是每 60 秒一次的
+        // `listCloudPcs` 状态刷新在持续刷新我们的"在线"状态。
+        // 因此这里不再定时拉状态：**只在某台机器真的该保活了**才向平台发请求，
+        // 其余时间完全静默（不登录、不拉列表），让本工具从平台侧看起来是离线的。
+        // 代价：界面上的电源状态只在保活那一刻更新，不再秒级实时（保活本身不受影响）。
+        const gateNow = Date.now();
+        const accIvSec = Math.max(60, parseInt(this.account.keepaliveInterval, 10) || 14400);
+        const persistedVms = this.account.vms || [];
+        const dueVms = persistedVms.filter((v) => {
+          if (v.keepaliveEnabled === false) return false;
+          const iv = Math.max(60, parseInt(v.keepaliveInterval, 10) || accIvSec);
+          const last = Number(v.lastKeepAliveAt) || 0;
+          // 提前 2 分钟进"即将到期"窗口，避免因 20 秒巡检粒度而错过整轮
+          return last === 0 || (gateNow - last) >= iv * 1000 - 120000;
+        });
+        // 只有当"有机器该保活了"或"手里一台机器都没有（首次使用）"时才联系平台
+        if (dueVms.length > 0 || persistedVms.length === 0) {
           await this.refreshVms().catch(() => {});
           this._lastVmsRefreshAt = Date.now();
         }

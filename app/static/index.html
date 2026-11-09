@@ -263,13 +263,14 @@
             <div class="form-text">若提示“请输入验证码”，请点击右侧图片获取并输入 4 位验证码。</div>
           </div>
           <div class="form-group">
-            <label>保活心跳与握手周期</label>
-            <select class="form-control" id="ydpc-interval">
-              <option value="600">10 分钟 (标准推荐)</option>
-              <option value="1200">20 分钟</option>
-              <option value="1680">28 分钟 (极低功耗)</option>
-              <option value="3600">1 小时</option>
-            </select>
+            <label>占线间隔（分钟，可自定义；每次占线固定 3 分钟）</label>
+            <div style="display: flex; gap: 8px; align-items: center;">
+              <input type="number" class="form-control" id="ydpc-interval" min="1" max="1440" step="1" value="240" placeholder="例如 240">
+              <span style="white-space: nowrap; font-size: 12px; color: var(--text-muted);">分钟</span>
+            </div>
+            <div class="form-text">
+              只填「隔多久占线一次」：<b>240</b> = 每 4 小时，<b>1440</b> = 每 24 小时。<b>每次占线固定 3 分钟</b>后主动断开释放会话，其余时间完全静默。单台云电脑可在账号卡片上单独覆盖该间隔。
+            </div>
           </div>
           <!-- 【2026-09-28】移动云侧的开机与守护由账号卡片内的「🛡️ 自动开机守护」控制
                （账号级 + 单机双开关，默认口径按底座分叉）；添加账号表单不再重复提供开关。 -->

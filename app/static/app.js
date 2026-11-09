@@ -491,7 +491,7 @@ function buildIntervalOverviewText(acc) {
   const isYdpc = acc.platform === 'ydpc';
   const isEcloud = acc.platform === 'ecloud';
   const useMinutes = isYdpc || isEcloud;
-  const fallbackSec = isYdpc ? 600 : (isEcloud ? 300 : 30);
+  const fallbackSec = isYdpc ? 14400 : (isEcloud ? 300 : 30);
   const defaultIntervalSec = parseInt(acc.keepaliveInterval || acc.pulseIntervalSeconds) || fallbackSec;
   const items = isYdpc ? (acc.vms || []) : (acc.desktops || []);
 
@@ -584,7 +584,7 @@ function buildYdpcVmMonitorHtml(acc) {
     const dot = YDPC_TONE_DOTS[view.tone] || '⚪';
 
     // 周期文本
-    const intervalSec = parseInt(view.intervalSec) || 600;
+    const intervalSec = parseInt(view.intervalSec) || 14400;
     const intervalText = intervalSec >= 60 ? `${Math.round(intervalSec / 60)} 分钟` : `${intervalSec} 秒`;
 
     // 距下次巡检倒计时：仅"运行中 + 单机保活开着 + 已有保活记录"才是有效语义
@@ -878,12 +878,8 @@ function buildAccountCardElement(acc, slotIndex) {
                   <div class="vm-device-footer">
                     <div class="pill-btn-group">
                       <button type="button" class="pill-toggle-btn ${keepClass}" id="pill-keep-${acc.id}-${escapeHtml(iid)}" onclick="toggleVmFeature('${acc.id}', '${escapeHtml(iid)}', 'keepaliveEnabled', ${!isKeepaliveOn})" title="单台云电脑独立保活开关">⚡保活: ${keepText}</button>
-                      <select class="pill-select" id="pill-interval-${acc.id}-${escapeHtml(iid)}" onchange="changeVmInterval('${acc.id}', '${escapeHtml(iid)}', this.value)" title="单台云电脑独立保活周期设置">
-                        <option value="" ${!d.keepaliveInterval ? 'selected' : ''}>⏱️继承默认</option>
-                        <option value="300" ${d.keepaliveInterval == 300 ? 'selected' : ''}>⏱️5分钟</option>
-                        <option value="600" ${d.keepaliveInterval == 600 ? 'selected' : ''}>⏱️10分钟</option>
-                        <option value="900" ${d.keepaliveInterval == 900 ? 'selected' : ''}>⏱️15分钟</option>
-                        <option value="1800" ${d.keepaliveInterval == 1800 ? 'selected' : ''}>⏱️30分钟</option>
+                      <select class="pill-select" id="pill-interval-${acc.id}-${escapeHtml(iid)}" onchange="changeVmInterval('${acc.id}', '${escapeHtml(iid)}', this.value)" title="单台云电脑独立保活周期设置（可选预设或自定义）">
+                        ${buildIntervalOptions(d.keepaliveInterval, 'min')}
                       </select>
                       <!-- 【2026-09-28】单机自动开机守护开关：与账号级 features.autoBoot 构成双重把关
                            （沿用移动爱家设计；被平台强制关机后由守护自动拉起）。 -->
@@ -1122,13 +1118,8 @@ function buildAccountCardElement(acc, slotIndex) {
                   <div class="vm-device-footer">
                     <div class="pill-btn-group">
                       <button type="button" class="pill-toggle-btn ${keepClass}" id="pill-keep-${acc.id}-${usid}" onclick="toggleVmFeature('${acc.id}', '${usid}', 'keepaliveEnabled', ${!isKeepaliveOn})" title="单台云电脑独立保活开关">⚡保活: ${keepText}</button>
-                      <select class="pill-select" id="pill-interval-${acc.id}-${usid}" onchange="changeVmInterval('${acc.id}', '${usid}', this.value)" title="单台云电脑独立保活周期设置">
-                        <option value="" ${!vm.keepaliveInterval ? 'selected' : ''}>⏱️继承默认</option>
-                        <option value="300" ${vm.keepaliveInterval == 300 ? 'selected' : ''}>⏱️5分钟</option>
-                        <option value="600" ${vm.keepaliveInterval == 600 ? 'selected' : ''}>⏱️10分钟</option>
-                        <option value="900" ${vm.keepaliveInterval == 900 ? 'selected' : ''}>⏱️15分钟</option>
-                        <option value="1800" ${vm.keepaliveInterval == 1800 ? 'selected' : ''}>⏱️30分钟</option>
-                        <option value="3600" ${vm.keepaliveInterval == 3600 ? 'selected' : ''}>⏱️60分钟</option>
+                      <select class="pill-select" id="pill-interval-${acc.id}-${usid}" onchange="changeVmInterval('${acc.id}', '${usid}', this.value)" title="单台云电脑独立保活周期设置（可选预设或自定义）">
+                        ${buildIntervalOptions(vm.keepaliveInterval, 'min')}
                       </select>
                       <!-- 【2026-09-23 新增】单机自动开机守护开关：与账号级 features.autoBoot 构成双重把关 -->
                       <!-- 【2026-09-26 恢复】SCG（深信服）底座开机已真机打通（CEM 通道：getConnectInfo 触发开机
@@ -1381,13 +1372,8 @@ function buildAccountCardElement(acc, slotIndex) {
                     <div class="pill-btn-group">
                       <button type="button" class="pill-toggle-btn ${keepClass}" id="pill-keep-${acc.id}-${targetId}" onclick="toggleVmFeature('${acc.id}', '${targetId}', 'keepaliveEnabled', ${!isKeepaliveOn})" title="单台云电脑独立保活开关 (脉冲长连保活)">⚡保活: ${keepText}</button>
                       <button type="button" class="pill-toggle-btn ${taskClass}" id="pill-task-${acc.id}-${targetId}" onclick="toggleVmFeature('${acc.id}', '${targetId}', 'taskEnabled', ${!isTaskOn})" title="单台云电脑独立任务开关 (控制打卡/AI对话/1小时挂机任务)">🎯任务: ${taskText}</button>
-                      <select class="pill-select" id="pill-interval-${acc.id}-${targetId}" onchange="changeVmInterval('${acc.id}', '${targetId}', this.value)" title="单台云电脑独立脉冲周期设置">
-                        <option value="" ${!d.keepaliveInterval ? 'selected' : ''}>⏱️继承默认</option>
-                        <option value="15" ${d.keepaliveInterval == 15 ? 'selected' : ''}>⏱️15s脉冲</option>
-                        <option value="30" ${d.keepaliveInterval == 30 ? 'selected' : ''}>⏱️30s脉冲</option>
-                        <option value="60" ${d.keepaliveInterval == 60 ? 'selected' : ''}>⏱️1分钟脉冲</option>
-                        <option value="120" ${d.keepaliveInterval == 120 ? 'selected' : ''}>⏱️2分钟脉冲</option>
-                        <option value="300" ${d.keepaliveInterval == 300 ? 'selected' : ''}>⏱️5分钟脉冲</option>
+                      <select class="pill-select" id="pill-interval-${acc.id}-${targetId}" onchange="changeVmInterval('${acc.id}', '${targetId}', this.value)" title="单台云电脑独立脉冲周期设置（可选预设或自定义）">
+                        ${buildIntervalOptions(d.keepaliveInterval, 'sec')}
                       </select>
                     </div>
                     <div style="display: flex; gap: 4px; align-items: center;">
@@ -2209,10 +2195,68 @@ async function toggleVmFeature(accId, vmKey, featureName, nextVal) {
   }
 }
 
+// 【2026-11-08】保活周期展示与下拉选项构建
+// 后端统一按「秒」存储；界面上 ydpc/ecloud 用分钟表达，天翼云脉冲仍用秒。
+function formatIntervalSec(sec) {
+  const s = parseInt(sec) || 0;
+  if (s <= 0) return '—';
+  if (s % 3600 === 0) return (s / 3600) + '小时';
+  if (s % 60 === 0) return (s / 60) + '分钟';
+  return s + '秒';
+}
+
+// 预设项 + 当前自定义值回显 + 「✏️自定义…」入口。
+// cur 为后端存储的秒数；unit 仅用于文案（'min' 表示界面按分钟表达）。
+function buildIntervalOptions(cur, unit = 'min') {
+  const c = parseInt(cur) || 0;
+  const presets = unit === 'min'
+    ? [[300, '5分钟'], [600, '10分钟'], [900, '15分钟'], [1800, '30分钟'],
+       [3600, '1小时'], [7200, '2小时'], [14400, '4小时'], [28800, '8小时'],
+       [43200, '12小时'], [86400, '24小时']]
+    : [[15, '15s脉冲'], [30, '30s脉冲'], [60, '1分钟脉冲'], [120, '2分钟脉冲'], [300, '5分钟脉冲']];
+
+  let html = `<option value="" ${!c ? 'selected' : ''}>⏱️继承默认</option>`;
+  const known = presets.some(([v]) => v === c);
+  if (c && !known) {
+    html += `<option value="${c}" selected>⏱️自定义 ${formatIntervalSec(c)}</option>`;
+  }
+  html += presets.map(([v, t]) => `<option value="${v}" ${c === v ? 'selected' : ''}>⏱️${t}</option>`).join('');
+  html += `<option value="__custom__">✏️自定义…</option>`;
+  return html;
+}
+
 // 单台云电脑独立保活周期调整
 async function changeVmInterval(accId, vmKey, value) {
   const acc = accounts.find(a => a.id === accId);
   if (!acc) return;
+
+  // 「✏️自定义…」：弹窗让用户直接填数字，单位按平台区分（移动两平台=分钟，天翼云=秒）
+  if (value === '__custom__') {
+    const isSecUnit = acc.platform !== 'ydpc' && acc.platform !== 'ecloud';
+    const curSec = (() => {
+      if (acc.platform === 'ydpc') {
+        const v = (acc.vms || []).find(x => String(x.userServiceId) === String(vmKey));
+        return parseInt(v && v.keepaliveInterval) || parseInt(acc.keepaliveInterval) || 0;
+      }
+      const d = (acc.desktops || []).find(x => String(x.instanceId || x.desktopId || x.objId) === String(vmKey));
+      return parseInt(d && d.keepaliveInterval) || parseInt(acc.keepaliveInterval) || 0;
+    })();
+    const unitCn = isSecUnit ? '秒' : '分钟';
+    const curShow = curSec > 0 ? (isSecUnit ? curSec : Math.round(curSec / 60)) : (isSecUnit ? 60 : 240);
+    const input = window.prompt(
+      `请输入这台云电脑的自定义保活周期（${unitCn}）\n` +
+      (isSecUnit ? '例如 60 = 60 秒' : '例如 240 = 4 小时，1440 = 24 小时'),
+      String(curShow)
+    );
+    if (input === null) { renderAccounts(); return; } // 取消 → 还原下拉
+    const num = parseFloat(input);
+    if (!num || num <= 0) {
+      showToast(`请输入大于 0 的${unitCn}数`, 'error');
+      renderAccounts();
+      return;
+    }
+    value = String(Math.max(60, Math.round(isSecUnit ? num : num * 60)));
+  }
 
   const numVal = parseInt(value);
   const finalVal = (!isNaN(numVal) && numVal > 0) ? numVal : null;
@@ -2411,6 +2455,9 @@ function openAddAccountModal() {
   if (ydCaptchaCode) ydCaptchaCode.value = "";
   const ydRandomCode = document.getElementById("ydpc-random-code");
   if (ydRandomCode) ydRandomCode.value = "";
+  // 新账号默认 4 小时占线一次（每次占线固定 3 分钟）
+  const ydIntervalEl = document.getElementById("ydpc-interval");
+  if (ydIntervalEl) ydIntervalEl.value = "240";
   const ydImg = document.getElementById("ydpc-captcha-img");
   if (ydImg) ydImg.style.display = "none";
   const ydLoading = document.getElementById("ydpc-captcha-loading");
@@ -2536,7 +2583,13 @@ async function saveYdpcAccount() {
   const user = document.getElementById("ydpc-user") ? document.getElementById("ydpc-user").value.trim() : "";
   const password = document.getElementById("ydpc-password") ? document.getElementById("ydpc-password").value.trim() : "";
   const accountType = document.getElementById("ydpc-account-type") ? document.getElementById("ydpc-account-type").value : "main";
-  const keepaliveInterval = document.getElementById("ydpc-interval") ? parseInt(document.getElementById("ydpc-interval").value) || 600 : 600;
+  // 【2026-11-08】周期改为「分钟」自由输入：后端统一按秒存储，这里做一次换算。
+  const keepaliveInterval = (() => {
+    const el = document.getElementById("ydpc-interval");
+    const mins = el ? parseFloat(el.value) : NaN;
+    const safeMins = (!isNaN(mins) && mins > 0) ? mins : 240;
+    return Math.max(60, Math.round(safeMins * 60));
+  })();
   const verificationCode = document.getElementById("ydpc-captcha-code") ? document.getElementById("ydpc-captcha-code").value.trim() : "";
   const randomCode = document.getElementById("ydpc-random-code") ? document.getElementById("ydpc-random-code").value.trim() : "";
 
@@ -2913,7 +2966,8 @@ function editAccount(accId) {
     if (userEl) userEl.value = acc.user || "";
     if (pwdEl) pwdEl.value = acc.password || "";
     if (typeEl) typeEl.value = acc.accountType || "main";
-    if (intEl) intEl.value = String(acc.keepaliveInterval || 600);
+    // 【2026-11-08】输入框单位是分钟，配置里存的是秒
+    if (intEl) intEl.value = String(Math.max(1, Math.round((parseInt(acc.keepaliveInterval) || 14400) / 60)));
 
     openModal("account-modal");
     switchAddAccountPlatform('ydpc');

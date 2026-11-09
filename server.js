@@ -4417,7 +4417,7 @@ function rewardNeedsDesktop(prodId, prodType) {
     const accountType = body.accountType || 'main';
     // 【2026-09-22】移动云账号创建时不显式写入 autoBoot（自动开机守护）：
     // 由账号级 + 单机双开关独立判定，省略即按默认口径（见 ydpc_client.js 的 _autoBootArmed）。
-    const keepaliveInterval = parseInt(body.keepaliveInterval) || 600;
+    const keepaliveInterval = parseInt(body.keepaliveInterval) || 14400;
     const verificationCode = (body.verificationCode || '').trim();
     const randomCode = (body.randomCode || '').trim();
 
@@ -6307,7 +6307,7 @@ function rewardNeedsDesktop(prodId, prodType) {
             user: a.user,
             password: a.password || '',
             deviceCode: a.deviceCode || '',
-            keepaliveInterval: parseInt(a.keepaliveInterval) || 600,
+            keepaliveInterval: parseInt(a.keepaliveInterval) || 14400,
             enabled: a.enabled !== false,
             features: a.features || { controlPlaneKeepalive: true, keepAlive: true },
             vms: a.vms || []
@@ -6453,7 +6453,7 @@ function rewardNeedsDesktop(prodId, prodType) {
         password: item.password || '',
         deviceCode: item.deviceCode || generateDeviceCode(),
         ecloudDeviceUid: isEcloud ? (item.ecloudDeviceUid || crypto.randomUUID()) : undefined,
-        keepaliveInterval: isYdpc ? (parseInt(item.keepaliveInterval) || 600) : (isEcloud ? (parseInt(item.keepaliveInterval) || 300) : undefined),
+        keepaliveInterval: isYdpc ? (parseInt(item.keepaliveInterval) || 14400) : (isEcloud ? (parseInt(item.keepaliveInterval) || 300) : undefined),
         displayConfig: item.displayConfig || { width: 2560, height: 1440, scale: 150 },
         enabled: item.enabled !== false,
         bound: isYdpc ? true : (item.bound !== false),

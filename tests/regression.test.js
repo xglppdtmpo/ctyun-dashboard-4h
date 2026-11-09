@@ -4324,7 +4324,8 @@ test('静态：SCG 开机走 CEM 通道（2026-09-26 真机打通），材料未
     '必须同时按 err.code 识别（日志措辞可能变，错误码不变）'
   );
   assert.ok(
-    /await new Promise\(\(r\) => setTimeout\(r, 60000\)\)/.test(ydpcCode),
+    /task\.nextDialAt = Date\.now\(\) \+ 60000/.test(ydpcCode) ||
+      /await new Promise\(\(r\) => setTimeout\(r, 60000\)\)/.test(ydpcCode),
     'SCG 材料未下发属于"机器未就绪"的软失败，必须以 60s 退避（不得用 30s 网络抖动节奏）'
   );
 });
@@ -5235,6 +5236,7 @@ testAsync('行为：pingCag 对 SCG 机与材料缺失机必须"返回未执行"
   let firmAuthCalls = 0;
   client.sohoClient = {
     sohoToken: 'stub',
+    userId: 'stub-user',
     getFirmAuth: async () => { firmAuthCalls++; return {}; }
   };
   client.login = async () => { throw new Error('守卫失效：不该走到重新登录'); };
