@@ -691,7 +691,7 @@ test('响应解密：明文 JSON 原样通过（兼容不带封装的部署）',
 test('startDesktop 请求：业务参数必须在 query string，不得塞进 body', () => {
   const q = cagBoot.buildConnectDesktopQuery({
     vmId: '41220471',
-    vmUserName: 'muyicn',
+    vmUserName: 'demo-user',
     accessToken: 'tok_abc',
     identity: { hostName: 'h', mac: 'aa-bb', clientIp: '10.0.0.2', snCode: 'SN1' },
     desktop: { uuid: 'uuid-1', userId: 7, groupId: -1, poolId: 0, connectionType: 0, desktopType: 1 }
@@ -702,7 +702,7 @@ test('startDesktop 请求：业务参数必须在 query string，不得塞进 bo
   }
   // 参数不得以 body 形式出现
   const body = cagBoot.buildConnectDesktopBody({
-    vmId: '41220471', vmUserName: 'muyicn', encryptedPassword: 'x', hostName: 'h', clientIp: 'i'
+    vmId: '41220471', vmUserName: 'demo-user', encryptedPassword: 'x', hostName: 'h', clientIp: 'i'
   });
   assert.ok(!('RspSecurity' in body.body), 'body 中不得出现 RspSecurity（它属于 query）');
 });

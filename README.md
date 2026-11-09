@@ -1,12 +1,13 @@
 # 🖥️ 云电脑可视化全功能多账号管理平台（天翼云 / 移动云三平台）
 
-> ## 📌 本仓库是复刻版
+> ## 📌 保活策略：每 4 小时占线 3 分钟
 >
-> **复刻自 [muyicn/ctyun-dashboard](https://github.com/muyicn/ctyun-dashboard)**，只改了「移动爱家 / 移动云电脑」的保活节奏与登录策略。
+> **移动云电脑（移动爱家）这条线：每 4 小时上线占一次线，每次只占 3 分钟就主动断开，其余时间完全静默。**
+> 一天每台 6 轮、合计在线约 18 分钟，既满足平台「24 小时无活动才关机」的判据，又不会把官方 App 顶下线。
 >
-> **改了什么：** 上游是高频保活（每 30 秒~几分钟发一次请求、切片一结束立刻重拨），会让官方 App 一连上就被顶下线（弹「云电脑已在其他终端抢占连接」）。本复刻改为 **每 4 小时上线占一次线、每次只占 3 分钟就主动断开，其余时间完全静默**；同时把登录态持久化、并发登录去重，重启不再顶掉官方 App。
+> 同时做了三件事保证「不频繁登录、不抢线」：登录态持久化复用（重启不重新登录）、并发登录去重（一个进程最多一次真实登录）、状态刷新改为「到期才请求」（不再定时轮询把本工具伪装成在线终端）。
 >
-> **详细改动、根因分析与踩坑记录见 [FORK-NOTES.md](./FORK-NOTES.md)。** 想要原版行为请直接用上游仓库。
+> **占线间隔可自定义**（4 / 8 / 12 / 24 小时，或按分钟填），**每次占线固定 3 分钟**。详细改动与排障要点见 [CHANGELOG.md](./CHANGELOG.md)。
 
 深度逆向**天翼云电脑**与**中国移动云电脑**官方通信协议，打造的**现代化、高性能、超轻量、纯原生协议、零无头浏览器**的多账号云电脑自动化保活与任务管理控制台。
 
@@ -76,8 +77,8 @@
 
 1. **下载或克隆本项目**：
    ```bash
-   git clone https://github.com/muyicn/ctyun-dashboard.git
-   cd ctyun-dashboard
+   git clone https://github.com/xglppdtmpo/ctyun-dashboard-4h.git
+   cd ctyun-dashboard-4h
    ```
 2. **直接双击运行 `start_dashboard.bat`**：
    - 脚本自动检测系统是否安装 Node.js（未安装会提示并引导至官网下载）；
@@ -89,25 +90,22 @@
 
 ### 方式二：Docker / Docker Compose 部署（飞牛 / 绿联 / 群晖 NAS 推荐）
 
-#### 1. 使用 Docker CLI 一键运行：
-```bash
-# Docker Hub 镜像 (推荐国内 NAS 用户拉取)
-docker run -d \
-  --name ctyun-dashboard \
-  -p 8571:8571 \
-  -v $(pwd)/data:/app/data \
-  --restart unless-stopped \
-  learycn/ctyun-dashboard:latest
-```
+#### 1. 使用 Docker CLI 运行（本地构建）
 
-或使用 GitHub Packages (GHCR) 镜像：
+> ⚠️ 公开镜像里**不含本仓库的保活改动**，请从源码构建，不要直接拉取公开镜像。
+
 ```bash
+git clone https://github.com/xglppdtmpo/ctyun-dashboard-4h.git
+cd ctyun-dashboard-4h
+
+docker build -t ctyun-dashboard:4h .
 docker run -d \
   --name ctyun-dashboard \
   -p 8571:8571 \
   -v $(pwd)/data:/app/data \
+  -e TZ=Asia/Shanghai \
   --restart unless-stopped \
-  ghcr.io/muyicn/ctyun-dashboard:latest
+  ctyun-dashboard:4h
 ```
 
 #### 2. 使用 `docker-compose.yml` 部署：
@@ -117,7 +115,8 @@ version: '3.8'
 
 services:
   ctyun-dashboard:
-    image: learycn/ctyun-dashboard:latest # 或 ghcr.io/muyicn/ctyun-dashboard:latest
+    build: .                      # 从本仓库源码构建（公开镜像不含保活改动）
+    image: ctyun-dashboard:4h
     container_name: ctyun-dashboard
     restart: unless-stopped
     ports:
@@ -158,8 +157,8 @@ docker compose up -d
 ### 方式三：从源码直接构建运行
 
 ```bash
-git clone https://github.com/muyicn/ctyun-dashboard.git
-cd ctyun-dashboard
+git clone https://github.com/xglppdtmpo/ctyun-dashboard-4h.git
+cd ctyun-dashboard-4h
 
 # 使用 Docker Compose 本地构建
 docker compose up -d --build

@@ -56,31 +56,11 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # 2. 登录 Docker Hub (明确绑定账号 learycn，支持 LEARYCN / DOCKERHUB_TOKEN 等 Secret)
-      - name: Log in to Docker Hub
-        id: dockerhub-login
-        continue-on-error: true
-        env:
-          DOCKER_USER: ${{ secrets.DOCKERHUB_USERNAME || 'learycn' }}
-          DOCKER_PASS: ${{ secrets.LEARYCN || secrets.DOCKERHUB_TOKEN || secrets.DOCKER_PASSWORD }}
-        if: env.DOCKER_PASS != ''
-        uses: docker/login-action@v3
-        with:
-          username: ${{ env.DOCKER_USER }}
-          password: ${{ env.DOCKER_PASS }}
-
-      # 3. 动态配置镜像目标列表 (推送至 learycn/ctyun-dashboard 与 ghcr.io/muyicn/ctyun-dashboard)
+      # 3. 镜像目标：只推送到本仓库自己的 GHCR（不涉及任何外部账号）
       - name: Determine Docker images
         id: image-targets
         run: |
-          IMAGES="ghcr.io/${{ github.repository }}"
-          if [ "${{ steps.dockerhub-login.outcome }}" = "success" ]; then
-            IMAGES="${IMAGES}
-          learycn/ctyun-dashboard"
-          fi
-          echo "images<<EOF" >> $GITHUB_OUTPUT
-          echo "$IMAGES" >> $GITHUB_OUTPUT
-          echo "EOF" >> $GITHUB_OUTPUT
+          echo "images=ghcr.io/${{ github.repository }}" >> $GITHUB_OUTPUT
 
       # 4. 提取镜像元数据与多架构标签
       - name: Extract Docker metadata
